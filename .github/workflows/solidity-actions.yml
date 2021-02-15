@@ -1,0 +1,11 @@
+on: [push]
+
+jobs:
+  solidity_6_action_job:
+    runs-on: ubuntu-latest
+    name: Solidity CI
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v2
+    - name: Compile solidity
+      uses: ./actions/solidity-0.6

@@ -1,0 +1,20 @@
+{
+  "name": "bifi-testing",
+  "version": "1.0.0",
+  "description": "",
+  "main": "truffle-config.js",
+  "scripts": {
+    "start": "truffle init"
+  },
+  "directories": {
+    "test": "test"
+  },
+  "dependencies": {
+    "solidity-docgen": "^0.5.11",
+    "truffle": "^5.1.62",
+    "truffle-hdwallet-provider": "^1.0.17"
+  },
+  "devDependencies": {},
+  "author": "",
+  "license": "ISC"
+}
