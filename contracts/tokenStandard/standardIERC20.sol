@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
+
 // from: https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/IERC20.sol
 pragma solidity 0.6.12;
-interface IERC20 {
+
+interface standardIERC20 {
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
     function transfer(address recipient, uint256 amount) external returns (bool);
