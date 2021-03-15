@@ -23,21 +23,16 @@ contract managerDataStorage is managerDataStorageInterface, ManagerDataStorageEr
 	}
 
 	uint256 globalRewardPerBlock;
-
 	uint256 globalRewardDecrement;
-
 	uint256 globalRewardTotalAmount;
 
 	uint256 alphaRate;
-
 	uint256 alphaLastUpdated;
 
 	uint256 rewardParamUpdateRewardPerBlock;
-
 	uint256 rewardParamUpdated;
 
 	uint256 interestUpdateRewardPerblock;
-
 	uint256 interestRewardLastUpdated;
 
 	mapping(uint256 => TokenHandler) tokenHandlers;
@@ -59,18 +54,17 @@ contract managerDataStorage is managerDataStorageInterface, ManagerDataStorageEr
 	constructor () public
 	{
 		owner = msg.sender;
+		uint256 this_block_number = block.number;
+
 		globalRewardPerBlock = 0x478291c1a0e982c98;
 		globalRewardDecrement = 0x7ba42eb3bfc;
 		globalRewardTotalAmount = (4 * 100000000) * (10 ** 18);
-		alphaRate = 2 * (10 ** 17);
-		alphaLastUpdated = block.number;
-		/*
-		            rewardParamUpdateRewardPerBlock = 1u * (10u ** 17u); // == 0.1
-		            rewardParamUpdated = block.getNumber();
 
-		            interestUpdateRewardPerblock = 5u * (10u ** 16u); // == 0.05
-		            interestRewardLastUpdated = block.getNumber();
-		            */
+		alphaRate = 2 * (10 ** 17);
+
+		alphaLastUpdated = this_block_number;
+		rewardParamUpdated = this_block_number;
+		interestRewardLastUpdated = this_block_number;
 	}
 
 	function ownershipTransfer(address payable _owner) onlyOwner public returns (bool)

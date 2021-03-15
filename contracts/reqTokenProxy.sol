@@ -12,9 +12,9 @@ import "./Errors.sol";
 /**
  * @title Bifi user request proxy (ERC-20 token)
  * @notice access logic contracts via delegate calls.
- * @author Bifi(seinmyung25, Miller-kk, tlatkdgus1, dongchangYoo)
+ * @author BiFi(seinmyung25, Miller-kk, tlatkdgus1, dongchangYoo)
  */
-contract proxy is RequestProxyErrors {
+contract tokenProxy is RequestProxyErrors {
 	address payable owner;
 
 	uint256 handlerID;

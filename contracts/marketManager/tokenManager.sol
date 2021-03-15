@@ -3,14 +3,20 @@
 pragma solidity 0.6.12;
 
 import "../interfaces/marketManagerInterface.sol";
-import "../interfaces/managerDataStorageInterface.sol";
-import "../interfaces/marketHandlerInterface.sol";
-import "../interfaces/oracleProxyInterface.sol";
+
+import "../interfacesForManager/managerDataStorageInterfaceForManager.sol";
+import "../interfacesForManager/oracleProxyInterfaceForManager.sol";
+
 import "../interfaces/liquidationManagerInterface.sol";
 import "../interfaces/proxyContractInterface.sol";
 import "../interfaces/tokenInterface.sol";
 import "../Errors.sol";
 import "../SafeMath.sol";
+
+import "../interfaces/observerInterface.sol";
+
+import "../interfaces/marketHandlerInterface.sol";
+import "../interfaces/SIInterface.sol";
 
 /**
  * @title Bifi's marketManager contract
@@ -19,20 +25,25 @@ import "../SafeMath.sol";
  */
 contract etherManager is marketManagerInterface, ManagerErrors {
 	using SafeMath for uint256;
+
 	address public owner;
+	mapping(address => bool) operators;
+	mapping(address => Breaker) internal breakerTable;
 
 	bool public emergency = false;
 
-	managerDataStorageInterface internal dataStorageInstance;
-
-	oracleProxyInterface internal oracleProxy;
+	managerDataStorageInterfaceForManager internal dataStorageInstance;
+	oracleProxyInterfaceForManager internal oracleProxy;
 
 	/* feat: manager reward token instance*/
 	IERC20 internal rewardErc20Instance;
 
-	string internal constant updateRewardLane = "updateRewardLane(address)";
+	observerInterface public observer;
 
-	mapping(address => Breaker) internal breakerTable;
+	uint256 public tokenHandlerLength;
+
+	event HandlerRewardUpdate(uint256 handlerID, uint256 alphaBaseAsset, uint256 rewardPerBlocks);
+	event ChainRewardUpdate(uint256 chainID, uint256 alphaBaseAsset, uint256 rewardPerBlocks);
 
 	struct UserAssetsInfo {
 		uint256 depositAssetSum;
@@ -57,15 +68,19 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		bool tried;
 	}
 
-	struct HandlerInfo {
+	struct ContractInfo {
 		bool support;
 		address addr;
 
 		proxyContractInterface tokenHandler;
 		bytes data;
-	}
 
-	uint256 public tokenHandlerLength;
+		marketHandlerInterface handlerFunction;
+		SIInterface siFunction;
+
+		oracleProxyInterfaceForManager oracleProxy;
+		managerDataStorageInterfaceForManager managerDataStorage;
+	}
 
 	modifier onlyOwner {
 		require(msg.sender == owner, ONLY_OWNER);
@@ -74,6 +89,12 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 
 	modifier onlyHandler(uint256 handlerID) {
 		_isHandler(handlerID);
+		_;
+	}
+
+	modifier onlyOperators {
+		address payable sender = msg.sender;
+		require(operators[sender] || sender == owner);
 		_;
 	}
 
@@ -120,8 +141,8 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	constructor (address managerDataStorageAddr, address oracleProxyAddr, address breaker, address erc20Addr) public
 	{
 		owner = msg.sender;
-		dataStorageInstance = managerDataStorageInterface(managerDataStorageAddr);
-		oracleProxy = oracleProxyInterface(oracleProxyAddr);
+		dataStorageInstance = managerDataStorageInterfaceForManager(managerDataStorageAddr);
+		oracleProxy = oracleProxyInterfaceForManager(oracleProxyAddr);
 		rewardErc20Instance = IERC20(erc20Addr);
 		breakerTable[owner].auth = true;
 		breakerTable[breaker].auth = true;
@@ -138,6 +159,11 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		return true;
 	}
 
+	function setOperator(address payable adminAddr, bool flag) onlyOwner external returns (bool) {
+		operators[adminAddr] = flag;
+		return flag;
+	}
+
 	/**
 	* @dev Set the address of oracleProxy contract
 	* @param oracleProxyAddr The address of oracleProxy contract
@@ -145,7 +171,7 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	*/
 	function setOracleProxy(address oracleProxyAddr) onlyOwner external override returns (bool)
 	{
-		oracleProxy = oracleProxyInterface(oracleProxyAddr);
+		oracleProxy = oracleProxyInterfaceForManager(oracleProxyAddr);
 		return true;
 	}
 
@@ -179,23 +205,23 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	*/
 	function setCircuitBreaker(bool _emergency) onlyBreaker external override returns (bool)
 	{
-		bytes memory data;
-
 		for (uint256 handlerID = 0; handlerID < tokenHandlerLength; handlerID++)
 		{
-			address tokenHandlerAddr = dataStorageInstance.getTokenHandlerAddr(handlerID);
-			proxyContractInterface tokenHandler = proxyContractInterface(tokenHandlerAddr);
+			proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
 
 			// use delegate call via handler proxy
 			// for token handlers
-			bytes memory callData = abi.encodeWithSignature("setCircuitBreaker(bool)", _emergency);
+			bytes memory callData = abi.encodeWithSelector(
+				marketHandlerInterface
+				.setCircuitBreaker.selector,
+				_emergency
+			);
 
 			tokenHandler.handlerProxy(callData);
 			tokenHandler.siProxy(callData);
 		}
 
-		address liquidationManagerAddr = dataStorageInstance.getLiquidationManagerAddr();
-		liquidationManagerInterface liquidationManager = liquidationManagerInterface(liquidationManagerAddr);
+		liquidationManagerInterface liquidationManager = liquidationManagerInterface(dataStorageInstance.getLiquidationManagerAddr());
 		liquidationManager.setCircuitBreaker(_emergency);
 		emergency = _emergency;
 		return true;
@@ -225,7 +251,12 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 			tokenHandlerAddr = dataStorageInstance.getTokenHandlerAddr(handlerID);
 			proxyContractInterface tokenHandler = proxyContractInterface(tokenHandlerAddr);
 			bytes memory data;
-			(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getTokenName()"));
+			(, data) = tokenHandler.handlerViewProxy(
+				abi.encodeWithSelector(
+					marketHandlerInterface
+					.getTokenName.selector
+				)
+			);
 			tokenName = abi.decode(data, (string));
 			support = true;
 		}
@@ -241,7 +272,9 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	*/
 	function handlerRegister(uint256 handlerID, address tokenHandlerAddr) onlyOwner external override returns (bool)
 	{
-		return _handlerRegister(handlerID, tokenHandlerAddr);
+    	dataStorageInstance.setTokenHandler(handlerID, tokenHandlerAddr);
+		tokenHandlerLength = tokenHandlerLength + 1;
+		return true;
 	}
 
 	/**
@@ -263,13 +296,19 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	*/
 	function rewardUpdateOfInAction(address payable userAddr, uint256 callerID) external override returns (bool)
 	{
-		HandlerInfo memory handlerInfo;
+		ContractInfo memory handlerInfo;
 		(handlerInfo.support, handlerInfo.addr) = dataStorageInstance.getTokenHandlerInfo(callerID);
 		if (handlerInfo.support)
 		{
 			proxyContractInterface tokenHandler;
 			tokenHandler = proxyContractInterface(handlerInfo.addr);
-			tokenHandler.siProxy(abi.encodeWithSignature(updateRewardLane, userAddr));
+			tokenHandler.siProxy(
+				abi.encodeWithSelector(
+					SIInterface
+					.updateRewardLane.selector,
+					userAddr
+				)
+			);
 		}
 
 		return true;
@@ -285,14 +324,14 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	function applyInterestHandlers(address payable userAddr, uint256 callerID, bool allFlag) external override returns (uint256, uint256, uint256, uint256, uint256, uint256)
 	{
 		UserAssetsInfo memory userAssetsInfo;
-		HandlerInfo memory handlerInfo;
-		oracleProxyInterface _oracleProxy = oracleProxy;
-		managerDataStorageInterface _dataStorage = dataStorageInstance;
+		ContractInfo memory handlerInfo;
+		handlerInfo.oracleProxy = oracleProxy;
+		handlerInfo.managerDataStorage = dataStorageInstance;
 
 		/* From all handlers, get the token price, margin call limit, borrow limit */
 		for (uint256 handlerID; handlerID < tokenHandlerLength; handlerID++)
 		{
-			(handlerInfo.support, handlerInfo.addr) = _dataStorage.getTokenHandlerInfo(handlerID);
+			(handlerInfo.support, handlerInfo.addr) = handlerInfo.managerDataStorage.getTokenHandlerInfo(handlerID);
 			if (handlerInfo.support)
 			{
 				handlerInfo.tokenHandler = proxyContractInterface(handlerInfo.addr);
@@ -300,25 +339,48 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 				/* If the full-calculation mode is not set, work on the given handler only */
 				if ((handlerID == callerID) || allFlag)
 				{
-					handlerInfo.tokenHandler.siProxy( abi.encodeWithSignature("updateRewardLane(address)", userAddr) );
-					(, handlerInfo.data) = handlerInfo.tokenHandler.handlerProxy( abi.encodeWithSignature("applyInterest(address)", userAddr) );
+					handlerInfo.tokenHandler.siProxy(
+						abi.encodeWithSelector(
+							handlerInfo.siFunction
+							.updateRewardLane.selector,
+							userAddr
+						)
+					);
+					(, handlerInfo.data) = handlerInfo.tokenHandler.handlerProxy(
+						abi.encodeWithSelector(
+							handlerInfo.handlerFunction
+							.applyInterest.selector,
+							userAddr
+						)
+					);
 
 					(userAssetsInfo.depositAmount, userAssetsInfo.borrowAmount) = abi.decode(handlerInfo.data, (uint256, uint256));
 				}
 				else
 				{
 					/* Get the deposit and borrow amount for the user */
-					(, handlerInfo.data) = handlerInfo.tokenHandler.handlerViewProxy( abi.encodeWithSignature("getUserAmount(address)", userAddr) );
+					(, handlerInfo.data) = handlerInfo.tokenHandler.handlerViewProxy(
+						abi.encodeWithSelector(
+							handlerInfo.handlerFunction
+							.getUserAmount.selector,
+							userAddr
+						)
+					);
 					(userAssetsInfo.depositAmount, userAssetsInfo.borrowAmount) = abi.decode(handlerInfo.data, (uint256, uint256));
 				}
 
-				(, handlerInfo.data) = handlerInfo.tokenHandler.handlerViewProxy( abi.encodeWithSignature("getTokenHandlerLimit()") );
+				(, handlerInfo.data) = handlerInfo.tokenHandler.handlerViewProxy(
+					abi.encodeWithSelector(
+						handlerInfo.handlerFunction
+						.getTokenHandlerLimit.selector
+					)
+				);
 				(userAssetsInfo.borrowLimit, userAssetsInfo.marginCallLimit) = abi.decode(handlerInfo.data, (uint256, uint256));
 
 				/* Get the token price */
 				if (handlerID == callerID)
 				{
-					userAssetsInfo.price = _oracleProxy.getTokenPrice(handlerID);
+					userAssetsInfo.price = handlerInfo.oracleProxy.getTokenPrice(handlerID);
 					userAssetsInfo.callerPrice = userAssetsInfo.price;
 					userAssetsInfo.callerBorrowLimit = userAssetsInfo.borrowLimit;
 				}
@@ -328,7 +390,7 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 				{
 					if (handlerID != callerID)
 					{
-						userAssetsInfo.price = _oracleProxy.getTokenPrice(handlerID);
+						userAssetsInfo.price = handlerInfo.oracleProxy.getTokenPrice(handlerID);
 					}
 
 					/* Compute the deposit parameters */
@@ -385,14 +447,16 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		{
 			proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
 			bytes memory data;
-			(, data) = tokenHandler.handlerProxy(abi.encodeWithSignature("checkFirstAction()"));
+			(, data) = tokenHandler.handlerProxy(
+				abi.encodeWithSelector(
+					marketHandlerInterface
+					.checkFirstAction.selector
+				)
+			);
 		}
 
-		uint256 globalRewardPerBlock = dataStorageInstance.getInterestUpdateRewardPerblock();
-		uint256 rewardAmount = delta.mul(globalRewardPerBlock);
-
 		/* transfer reward tokens */
-		return _rewardTransfer(msg.sender, rewardAmount);
+		return _rewardTransfer(msg.sender, delta.mul(dataStorageInstance.getInterestUpdateRewardPerblock()));
 	}
 
 	/**
@@ -400,7 +464,7 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	* @param userAddr The address of operator
 	* @return Whether or not the operation succeed
 	*/
-	function updateRewardParams(address payable userAddr) external override returns (bool)
+	function updateRewardParams(address payable userAddr) onlyOperators external override returns (bool)
 	{
 		if (_determineRewardParams(userAddr))
 		{
@@ -415,22 +479,48 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	* @param userAddr The user address
 	* @return true (TODO: validate results)
 	*/
-	function rewardClaimAll(address payable userAddr) external override returns (bool)
+	function rewardClaimAll(address payable userAddr) external override returns (uint256)
 	{
 		uint256 handlerID;
 		uint256 claimAmountSum;
-		bytes memory data;
 		for (handlerID; handlerID < tokenHandlerLength; handlerID++)
 		{
-			proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
-			(, data) = tokenHandler.siProxy(abi.encodeWithSignature(updateRewardLane, userAddr));
-
-			/* Claim reward for a token handler */
-			(, data) = tokenHandler.siProxy(abi.encodeWithSignature("claimRewardAmountUser(address)", userAddr));
-			claimAmountSum = claimAmountSum.add(abi.decode(data, (uint256)));
+			claimAmountSum = claimAmountSum.add(_claimHandlerRewardAmount(handlerID, userAddr));
 		}
+		require(_rewardTransfer(userAddr, claimAmountSum));
+		return claimAmountSum;
+	}
 
-		return _rewardTransfer(userAddr, claimAmountSum);
+	/* TODO: comment */
+	function claimHandlerReward(uint256 handlerID, address payable userAddr) external returns (uint256) {
+		uint256 amount = _claimHandlerRewardAmount(handlerID, userAddr);
+
+		require(_rewardTransfer(userAddr, amount));
+
+		return amount;
+	}
+
+	/* TODO: comment */
+	function _claimHandlerRewardAmount(uint256 handlerID, address payable userAddr) internal returns (uint256) {
+		bytes memory data;
+
+		proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
+		tokenHandler.siProxy(
+			abi.encodeWithSelector(
+				SIInterface
+				.updateRewardLane.selector,
+				userAddr
+			)
+		);
+
+		/* Claim reward for a token handler */
+		(, data) = tokenHandler.siProxy(
+			abi.encodeWithSelector(
+				SIInterface.claimRewardAmountUser.selector,
+				userAddr
+			)
+		);
+		return abi.decode(data, (uint256));
 	}
 
 	/**
@@ -451,11 +541,14 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	*/
 	function _rewardTransfer(address payable userAddr, uint256 _amount) internal returns (bool)
 	{
-		uint256 beforeBalance = rewardErc20Instance.balanceOf(userAddr);
-		rewardErc20Instance.transfer(userAddr, _amount);
-		uint256 afterBalance = rewardErc20Instance.balanceOf(userAddr);
-		require(_amount == afterBalance.sub(beforeBalance), REWARD_TRANSFER);
-		return true;
+		IERC20 _rewardERC20 = rewardErc20Instance;
+
+		if(address(_rewardERC20) != address(0x0)) {
+			uint256 beforeBalance = _rewardERC20.balanceOf(userAddr);
+			_rewardERC20.transfer(userAddr, _amount);
+			require(_amount == _rewardERC20.balanceOf(userAddr).sub(beforeBalance), REWARD_TRANSFER);
+			return true;
+		}
 	}
 
 	/**
@@ -467,21 +560,21 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	function _determineRewardParams(address payable userAddr) internal returns (bool)
 	{
 		uint256 thisBlockNum = block.number;
-		managerDataStorageInterface _dataStorageInstance = dataStorageInstance;
+		managerDataStorageInterfaceForManager _dataStorage = dataStorageInstance;
 		/* The inactive period (delta) since the last action happens */
-		uint256 delta = thisBlockNum - _dataStorageInstance.getRewardParamUpdated();
-		_dataStorageInstance.setRewardParamUpdated(thisBlockNum);
+		uint256 delta = thisBlockNum - _dataStorage.getRewardParamUpdated();
+		_dataStorage.setRewardParamUpdated(thisBlockNum);
 		if (delta == 0)
 		{
 			return false;
 		}
 
 		/* Rewards assigned for a block */
-		uint256 globalRewardPerBlock = _dataStorageInstance.getGlobalRewardPerBlock();
+		uint256 globalRewardPerBlock = _dataStorage.getGlobalRewardPerBlock();
 		/* Rewards decrement for a block. (Rewards per block monotonically decreases) */
-		uint256 globalRewardDecrement = _dataStorageInstance.getGlobalRewardDecrement();
+		uint256 globalRewardDecrement = _dataStorage.getGlobalRewardDecrement();
 		/* Total amount of rewards */
-		uint256 globalRewardTotalAmount = _dataStorageInstance.getGlobalRewardTotalAmount();
+		uint256 globalRewardTotalAmount = _dataStorage.getGlobalRewardTotalAmount();
 
 		/* Remaining periods for reward distribution */
 		uint256 remainingPeriod = globalRewardPerBlock.unifiedDiv(globalRewardDecrement);
@@ -492,7 +585,7 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		}
 		else
 		{
-			return _epilogueOfDetermineRewardParams(_dataStorageInstance, userAddr, delta, 0, globalRewardDecrement, 0);
+			return _epilogueOfDetermineRewardParams(_dataStorage, userAddr, delta, 0, globalRewardDecrement, 0);
 		}
 
 		if (globalRewardTotalAmount >= globalRewardPerBlock.mul(delta))
@@ -501,18 +594,18 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		}
 		else
 		{
-			return _epilogueOfDetermineRewardParams(_dataStorageInstance, userAddr, delta, 0, globalRewardDecrement, 0);
+			return _epilogueOfDetermineRewardParams(_dataStorage, userAddr, delta, 0, globalRewardDecrement, 0);
 		}
 
 		globalRewardPerBlock = globalRewardTotalAmount.mul(2).unifiedDiv(remainingPeriod.add(SafeMath.unifiedPoint));
 		/* To incentivze the update operation, the operator get paid with the
 		reward token */
-		return _epilogueOfDetermineRewardParams(_dataStorageInstance, userAddr, delta, globalRewardPerBlock, globalRewardDecrement, globalRewardTotalAmount);
+		return _epilogueOfDetermineRewardParams(_dataStorage, userAddr, delta, globalRewardPerBlock, globalRewardDecrement, globalRewardTotalAmount);
 	}
 
 	/**
 	* @dev Epilogue of _determineRewardParams for code-size savings
-	* @param _dataStorageInstance interface of Manager Data Storage
+	* @param _dataStorage interface of Manager Data Storage
 	* @param userAddr User Address for Reward token transfer
 	* @param _delta The inactive period (delta) since the last action happens
 	* @param _globalRewardPerBlock Reward per block
@@ -521,32 +614,22 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	* @return true (TODO: validate results)
 	*/
 	function _epilogueOfDetermineRewardParams(
-		managerDataStorageInterface _dataStorageInstance,
+		managerDataStorageInterfaceForManager _dataStorage,
 		address payable userAddr,
 		uint256 _delta,
 		uint256 _globalRewardPerBlock,
 		uint256 _globalRewardDecrement,
 		uint256 _globalRewardTotalAmount
 	) internal returns (bool) {
-		_updateDeterminedRewardModelParam(_globalRewardPerBlock, _globalRewardDecrement, _globalRewardTotalAmount);
-		uint256 rewardAmount = _delta.mul(_dataStorageInstance.getRewardParamUpdateRewardPerBlock());
+    // Set the reward model parameters
+    	_dataStorage.setGlobalRewardPerBlock(_globalRewardPerBlock);
+		_dataStorage.setGlobalRewardDecrement(_globalRewardDecrement);
+		_dataStorage.setGlobalRewardTotalAmount(_globalRewardTotalAmount);
+
+		uint256 rewardAmount = _delta.mul(_dataStorage.getRewardParamUpdateRewardPerBlock());
 		/* To incentivze the update operation, the operator get paid with the
 		reward token */
 		_rewardTransfer(userAddr, rewardAmount);
-		return true;
-	}
-	/**
-	* @dev Set the reward model parameters
-	* @param _rewardPerBlock Reward per block
-	* @param _dcrement Rewards decrement for a block
-	* @param _total Total amount of rewards
-	* @return true (TODO: validate results)
-	*/
-	function _updateDeterminedRewardModelParam(uint256 _rewardPerBlock, uint256 _dcrement, uint256 _total) internal returns (bool)
-	{
-		dataStorageInstance.setGlobalRewardPerBlock(_rewardPerBlock);
-		dataStorageInstance.setGlobalRewardDecrement(_dcrement);
-		dataStorageInstance.setGlobalRewardTotalAmount(_total);
 		return true;
 	}
 
@@ -560,6 +643,7 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		uint256 handlerLength = tokenHandlerLength;
 		bytes memory data;
 		uint256[] memory handlerAlphaRateBaseAsset = new uint256[](handlerLength);
+		uint256[] memory chainAlphaRateBaseAsset;
 		uint256 handlerID;
 		uint256 alphaRateBaseGlobalAssetSum;
 		for (handlerID; handlerID < handlerLength; handlerID++)
@@ -568,21 +652,52 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 			alphaRateBaseGlobalAssetSum = alphaRateBaseGlobalAssetSum.add(handlerAlphaRateBaseAsset[handlerID]);
 		}
 
+		chainAlphaRateBaseAsset = observer.getAlphaBaseAsset();
 		handlerID = 0;
+		for (;handlerID < chainAlphaRateBaseAsset.length; handlerID++) {
+			alphaRateBaseGlobalAssetSum = alphaRateBaseGlobalAssetSum.add(chainAlphaRateBaseAsset[handlerID]);
+		}
+
+		handlerID = 0;
+		uint256 globalRewardPerBlocks = dataStorageInstance.getGlobalRewardPerBlock();
+
 		for (handlerID; handlerID < handlerLength; handlerID++)
 		{
 			proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
-			(, data) = tokenHandler.siProxy(abi.encodeWithSignature(updateRewardLane, userAddr));
+			(, data) = tokenHandler.siProxy(
+				abi.encodeWithSelector(
+					SIInterface
+					.updateRewardLane.selector,
+					userAddr
+				)
+			);
 
 			/* Update reward parameter for the token handler */
-			data = abi.encodeWithSignature("updateRewardPerBlockLogic(uint256)",
-							dataStorageInstance.getGlobalRewardPerBlock()
-							.unifiedMul(
+			uint256 rewardPerBlocks = globalRewardPerBlocks
+								.unifiedMul(
 								handlerAlphaRateBaseAsset[handlerID]
 								.unifiedDiv(alphaRateBaseGlobalAssetSum)
-								)
-							);
+								);
+			data = abi.encodeWithSelector(
+				SIInterface.updateRewardPerBlockLogic.selector,
+				rewardPerBlocks
+			);
 			(, data) = tokenHandler.siProxy(data);
+
+			emit HandlerRewardUpdate(handlerID, handlerAlphaRateBaseAsset[handlerID], rewardPerBlocks);
+		}
+
+		handlerID = 0;
+		for (;handlerID < chainAlphaRateBaseAsset.length; handlerID++) {
+			uint256 rewardPerBlocks = chainAlphaRateBaseAsset[handlerID]
+										.unifiedDiv(alphaRateBaseGlobalAssetSum)
+										.unifiedMul(globalRewardPerBlocks);
+
+			observer.setChainGlobalRewardPerblock(
+				handlerID,
+				rewardPerBlocks
+			);
+			emit ChainRewardUpdate(handlerID, chainAlphaRateBaseAsset[handlerID], rewardPerBlocks);
 		}
 
 		return true;
@@ -597,15 +712,30 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	{
 		bytes memory data;
 		proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(_handlerID));
-		(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getDepositTotalAmount()"));
+
+    // TODO merge call
+		(, data) = tokenHandler.handlerViewProxy(
+			abi.encodeWithSelector(
+				marketHandlerInterface
+				.getDepositTotalAmount.selector
+			)
+		);
 		uint256 _depositAmount = abi.decode(data, (uint256));
 
-		(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getBorrowTotalAmount()"));
+		(, data) = tokenHandler.handlerViewProxy(
+			abi.encodeWithSelector(
+				marketHandlerInterface
+				.getBorrowTotalAmount.selector
+			)
+		);
 		uint256 _borrowAmount = abi.decode(data, (uint256));
 
-		uint256 _alpha = dataStorageInstance.getAlphaRate();
-		uint256 _price = _getTokenHandlerPrice(_handlerID);
-		return _calcAlphaBaseAmount(_alpha, _depositAmount, _borrowAmount).unifiedMul(_price);
+		return _calcAlphaBaseAmount(
+              dataStorageInstance.getAlphaRate(),
+              _depositAmount,
+              _borrowAmount
+            )
+            .unifiedMul(_getTokenHandlerPrice(_handlerID));
 	}
 
 	/**
@@ -649,7 +779,12 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	{
 		proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
 		bytes memory data;
-		(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getTokenHandlerMarginCallLimit()"));
+		(, data) = tokenHandler.handlerViewProxy(
+			abi.encodeWithSelector(
+				marketHandlerInterface
+				.getTokenHandlerMarginCallLimit.selector
+			)
+		);
 		return abi.decode(data, (uint256));
 	}
 
@@ -673,7 +808,12 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
 
 		bytes memory data;
-		(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getTokenHandlerBorrowLimit()"));
+		(, data) = tokenHandler.handlerViewProxy(
+			abi.encodeWithSelector(
+				marketHandlerInterface
+				.getTokenHandlerBorrowLimit.selector
+			)
+		);
 		return abi.decode(data, (uint256));
 	}
 
@@ -777,7 +917,28 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	{
 		uint256 userTotalBorrowLimitAsset;
 		uint256 userTotalMarginCallLimitAsset;
-		(userTotalBorrowLimitAsset, userTotalMarginCallLimitAsset) = _getUserLimitIntraAsset(userAddr);
+
+		for (uint256 handlerID; handlerID < tokenHandlerLength; handlerID++)
+		{
+			if (dataStorageInstance.getTokenHandlerSupport(handlerID))
+			{
+				uint256 depositHandlerAsset;
+				uint256 borrowHandlerAsset;
+				(depositHandlerAsset, borrowHandlerAsset) = _getUserIntraHandlerAssetWithInterest(userAddr, handlerID);
+				uint256 borrowLimit = _getTokenHandlerBorrowLimit(handlerID);
+				uint256 marginCallLimit = _getTokenHandlerMarginCallLimit(handlerID);
+				uint256 userBorrowLimitAsset = depositHandlerAsset.unifiedMul(borrowLimit);
+				uint256 userMarginCallLimitAsset = depositHandlerAsset.unifiedMul(marginCallLimit);
+				userTotalBorrowLimitAsset = userTotalBorrowLimitAsset.add(userBorrowLimitAsset);
+				userTotalMarginCallLimitAsset = userTotalMarginCallLimitAsset.add(userMarginCallLimitAsset);
+			}
+			else
+			{
+				continue;
+			}
+
+		}
+
 		return (userTotalBorrowLimitAsset, userTotalMarginCallLimitAsset);
 	}
 
@@ -835,7 +996,15 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		proxyContractInterface tokenHandler = proxyContractInterface(tokenHandlerAddr);
 		bytes memory data;
 
-		data = abi.encodeWithSignature("partialLiquidationUser(address,uint256,address,uint256)", delinquentBorrower, liquidateAmount, liquidator, rewardHandlerID);
+		data = abi.encodeWithSelector(
+			marketHandlerInterface
+			.partialLiquidationUser.selector,
+
+			delinquentBorrower,
+			liquidateAmount,
+			liquidator,
+			rewardHandlerID
+		);
 		(, data) = tokenHandler.handlerProxy(data);
 
 		return abi.decode(data, (uint256, uint256, uint256));
@@ -882,7 +1051,14 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		address tokenHandlerAddr = dataStorageInstance.getTokenHandlerAddr(handlerID);
 		proxyContractInterface tokenHandler = proxyContractInterface(tokenHandlerAddr);
 		bytes memory data;
-		data = abi.encodeWithSignature("partialLiquidationUserReward(address,uint256,address)", delinquentBorrower, rewardAmount, liquidator);
+		data = abi.encodeWithSelector(
+			marketHandlerInterface
+			.partialLiquidationUserReward.selector,
+
+			delinquentBorrower,
+			rewardAmount,
+			liquidator
+		);
 		(, data) = tokenHandler.handlerProxy(data);
 
 		return abi.decode(data, (uint256));
@@ -898,7 +1074,13 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	{
 		proxyContractInterface tokenHandler = proxyContractInterface(dataStorageInstance.getTokenHandlerAddr(handlerID));
 		bytes memory data;
-		(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getUserAmount(address)", userAddr));
+		(, data) = tokenHandler.handlerViewProxy(
+			abi.encodeWithSelector(
+				marketHandlerInterface
+				.getUserAmount.selector,
+				userAddr
+			)
+		);
 		return abi.decode(data, (uint256, uint256));
 	}
 
@@ -926,19 +1108,6 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	}
 
 	/**
-	* @dev Register a handler
-	* @param handlerID The handler ID
-	* @param handlerAddr The handler address
-	* @return true (TODO: validate results)
-	*/
-	function _handlerRegister(uint256 handlerID, address handlerAddr) internal returns (bool)
-	{
-		dataStorageInstance.setTokenHandler(handlerID, handlerAddr);
-		tokenHandlerLength = tokenHandlerLength + 1;
-		return true;
-	}
-
-	/**
 	* @dev Get the deposit and borrow amount of the user with interest added
 	* @param userAddr The address of user
 	* @param handlerID The handler ID
@@ -952,46 +1121,17 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 		uint256 borrowAmount;
 
 		bytes memory data;
-		(, data) = tokenHandler.handlerViewProxy(abi.encodeWithSignature("getUserAmountWithInterest(address)", userAddr));
+		(, data) = tokenHandler.handlerViewProxy(
+			abi.encodeWithSelector(
+				marketHandlerInterface.getUserAmountWithInterest.selector,
+				userAddr
+			)
+		);
 		(depositAmount, borrowAmount) = abi.decode(data, (uint256, uint256));
 
 		uint256 depositAsset = depositAmount.unifiedMul(price);
 		uint256 borrowAsset = borrowAmount.unifiedMul(price);
 		return (depositAsset, borrowAsset);
-	}
-
-	/**
-	* @dev Get the borrow and margin call limits of the user for all handlers (internal)
-	* @param userAddr The address of the user
-	* @return userTotalBorrowLimitAsset the sum of borrow limit for all handlers
-	* @return userTotalMarginCallLimitAsset the sume of margin call limit for handlers
-	*/
-	function _getUserLimitIntraAsset(address payable userAddr) internal view returns (uint256, uint256)
-	{
-		uint256 userTotalBorrowLimitAsset;
-		uint256 userTotalMarginCallLimitAsset;
-		for (uint256 handlerID; handlerID < tokenHandlerLength; handlerID++)
-		{
-			if (dataStorageInstance.getTokenHandlerSupport(handlerID))
-			{
-				uint256 depositHandlerAsset;
-				uint256 borrowHandlerAsset;
-				(depositHandlerAsset, borrowHandlerAsset) = _getUserIntraHandlerAssetWithInterest(userAddr, handlerID);
-				uint256 borrowLimit = _getTokenHandlerBorrowLimit(handlerID);
-				uint256 marginCallLimit = _getTokenHandlerMarginCallLimit(handlerID);
-				uint256 userBorrowLimitAsset = depositHandlerAsset.unifiedMul(borrowLimit);
-				uint256 userMarginCallLimitAsset = depositHandlerAsset.unifiedMul(marginCallLimit);
-				userTotalBorrowLimitAsset = userTotalBorrowLimitAsset.add(userBorrowLimitAsset);
-				userTotalMarginCallLimitAsset = userTotalMarginCallLimitAsset.add(userMarginCallLimitAsset);
-			}
-			else
-			{
-				continue;
-			}
-
-		}
-
-		return (userTotalBorrowLimitAsset, userTotalMarginCallLimitAsset);
 	}
 
 	/**
@@ -1051,7 +1191,11 @@ contract etherManager is marketManagerInterface, ManagerErrors {
 	*/
 	function getGlobalRewardInfo() external view override returns (uint256, uint256, uint256)
 	{
-		managerDataStorageInterface _dataStorage = dataStorageInstance;
+		managerDataStorageInterfaceForManager _dataStorage = dataStorageInstance;
 		return (_dataStorage.getGlobalRewardPerBlock(), _dataStorage.getGlobalRewardDecrement(), _dataStorage.getGlobalRewardTotalAmount());
+	}
+
+	function setObserverAddr(address observerAddr) onlyOwner external returns (bool) {
+		observer = observerInterface( observerAddr );
 	}
 }

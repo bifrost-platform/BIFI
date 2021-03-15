@@ -309,11 +309,9 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 		require(liquidatorLiquidityAmount > liquidateAmount, NO_EFFECTIVE_BALANCE);
 
       /* update storage for liquidate*/
-		handlerDataStorage.subUserIntraDepositAmount(liquidator, liquidateAmount);
-		handlerDataStorage.subDepositTotalAmount(liquidateAmount);
+		handlerDataStorage.subDepositAmount(liquidator, liquidateAmount);
 
-		handlerDataStorage.subUserIntraBorrowAmount(delinquentBorrower, liquidateAmount);
-		handlerDataStorage.subBorrowTotalAmount(liquidateAmount);
+		handlerDataStorage.subBorrowAmount(delinquentBorrower, liquidateAmount);
 
 		return (liquidateAmount, delinquentDepositAsset, delinquentBorrowAsset);
 	}
@@ -327,13 +325,16 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 	*/
 	function partialLiquidationUserReward(address payable delinquentBorrower, uint256 liquidationAmountWithReward, address payable liquidator) onlyMarketManager external override returns (uint256)
 	{
+		marketManager.rewardUpdateOfInAction(delinquentBorrower, handlerID);
+		_applyInterest(delinquentBorrower);
 		/* check delinquentBorrower's collateral enough */
 		uint256 collateralAmount = handlerDataStorage.getUserIntraDepositAmount(delinquentBorrower);
 		require(collateralAmount >= liquidationAmountWithReward, NO_LIQUIDATION_REWARD);
 
-		/* collateral transfer(in storage level)*/
-		handlerDataStorage.subUserIntraDepositAmount(delinquentBorrower, liquidationAmountWithReward);
-		handlerDataStorage.addUserIntraDepositAmount(liquidator, liquidationAmountWithReward);
+		/* collateral transfer */
+		handlerDataStorage.subDepositAmount(delinquentBorrower, liquidationAmountWithReward);
+
+		_transfer(liquidator, liquidationAmountWithReward);
 
 		return liquidationAmountWithReward;
 	}
@@ -405,7 +406,7 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 	function _getUserMaxBorrowAmount(address payable userAddr) internal view returns (uint256)
 	{
 		/* Prevent Action: over "Token Liquidity" amount*/
-		uint256 handlerLiquidityAmount = _getTokenLiquidityAmountWithInterest(userAddr);
+		uint256 handlerLiquidityAmount = _getTokenLiquidityLimitAmountWithInterest(userAddr);
 		/* Prevent Action: over "CREDIT" amount */
 		uint256 userLiquidityAmount = marketManager.getUserExtraLiquidityAmount(userAddr, handlerID);
 		uint256 minAmount = userLiquidityAmount;
@@ -426,7 +427,7 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 	function _getUserActionMaxBorrowAmount(uint256 requestedAmount, uint256 userLiquidityAmount) internal view returns (uint256)
 	{
 		/* Prevent Action: over "Token Liquidity" amount*/
-		uint256 handlerLiquidityAmount = _getTokenLiquidityAmount();
+		uint256 handlerLiquidityAmount = _getTokenLiquidityLimitAmount();
 
 		/* select minimum of handlerLiqudity and user liquidity */
 		uint256 minAmount = requestedAmount;
@@ -463,7 +464,7 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 		uint256 totalDepositAmount = handlerDataStorage.getDepositTotalAmount();
 		uint256 totalBorrowAmount = handlerDataStorage.getBorrowTotalAmount();
 
-		return interestModelInstance.getSIRandBIR(address(handlerDataStorage), totalDepositAmount, totalBorrowAmount);
+		return interestModelInstance.getSIRandBIR(totalDepositAmount, totalBorrowAmount);
 	}
 
 	/**
@@ -929,13 +930,36 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 	}
 
 	/**
-	* @dev Get a pure amount of liquidity, excluding the amount of borrow from the handler
-	* @return The amount of liquidity
+	* @dev Get (total deposit - total borrow) of the handler
+	* @return (total deposit - total borrow) of the handler
 	*/
 	function _getTokenLiquidityAmount() internal view returns (uint256)
 	{
 		marketHandlerDataStorageInterface _handlerDataStorage = handlerDataStorage;
+		uint256 depositTotalAmount;
+		uint256 borrowTotalAmount;
+		(depositTotalAmount, borrowTotalAmount) = _handlerDataStorage.getHandlerAmount();
 
+		if (depositTotalAmount == 0)
+		{
+			return 0;
+		}
+
+		if (depositTotalAmount < borrowTotalAmount)
+		{
+			return 0;
+		}
+
+		return sub(depositTotalAmount, borrowTotalAmount);
+	}
+
+	/**
+	* @dev Get (total deposit * liquidity limit - total borrow) of the handler
+	* @return (total deposit * liquidity limit - total borrow) of the handler
+	*/
+	function _getTokenLiquidityLimitAmount() internal view returns (uint256)
+	{
+		marketHandlerDataStorageInterface _handlerDataStorage = handlerDataStorage;
 		uint256 depositTotalAmount;
 		uint256 borrowTotalAmount;
 		(depositTotalAmount, borrowTotalAmount) = _handlerDataStorage.getHandlerAmount();
@@ -946,7 +970,6 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 		}
 
 		uint256 liquidityDeposit = unifiedMul(depositTotalAmount, _handlerDataStorage.getLiquidityLimit());
-
 		if (liquidityDeposit < borrowTotalAmount)
 		{
 			return 0;
@@ -961,6 +984,29 @@ contract tokenHandler is marketHandlerInterface, HandlerErrors {
 	* @return (total deposit - total borrow) of the handler including interest
 	*/
 	function _getTokenLiquidityAmountWithInterest(address payable userAddr) internal view returns (uint256)
+	{
+		uint256 depositTotalAmount;
+		uint256 borrowTotalAmount;
+		(depositTotalAmount, borrowTotalAmount) = _getTotalAmountWithInterest(userAddr);
+
+		if (depositTotalAmount == 0)
+		{
+			return 0;
+		}
+
+		if (depositTotalAmount < borrowTotalAmount)
+		{
+			return 0;
+		}
+
+		return sub(depositTotalAmount, borrowTotalAmount);
+	}
+	/**
+	* @dev Get (total deposit * liquidity limit - total borrow) of the handler including interest
+	* @param userAddr The user address(for wrapping function, unused)
+	* @return (total deposit * liquidity limit - total borrow) of the handler including interest
+	*/
+	function _getTokenLiquidityLimitAmountWithInterest(address payable userAddr) internal view returns (uint256)
 	{
 		uint256 depositTotalAmount;
 		uint256 borrowTotalAmount;

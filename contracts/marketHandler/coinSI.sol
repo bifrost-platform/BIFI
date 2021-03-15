@@ -108,6 +108,10 @@ contract coinSI is SIInterface, SIErrors {
 	*/
 	function updateRewardLane(address payable userAddr) external override returns (bool)
 	{
+		return _updateRewardLane(userAddr);
+	}
+	function _updateRewardLane(address payable userAddr) internal returns (bool)
+  {
 		MarketRewardInfo memory market;
 		UserRewardInfo memory user;
 		marketSIHandlerDataStorageInterface _SIHandlerDataStorage = SIHandlerDataStorage;
@@ -214,7 +218,7 @@ contract coinSI is SIInterface, SIErrors {
 	* @param userAddr The address of user who claimed
 	* @return The amount of user's reward
 	*/
-	function claimRewardAmountUser(address payable userAddr) onlyMarketManager external returns (uint256)
+	function claimRewardAmountUser(address payable userAddr) onlyMarketManager external override returns (uint256)
 	{
 		return _claimRewardAmountUser(userAddr);
 	}

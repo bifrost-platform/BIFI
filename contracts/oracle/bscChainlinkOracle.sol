@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-License-Identifier: UNLICENSED
 
 pragma solidity 0.6.12;
 
@@ -10,7 +10,7 @@ import "../Errors.sol";
  * @title Bifi's OracleProxy Contract
  * @notice Communicate with the contract that
  * provides the price of token
- * @author BiFi(seinmyung25, Miller-kk, tlatkdgus1, dongchangYoo)
+ * @author Bifi (seinmyung25, Miller-kk, tlatkdgus1, dongchangYoo)
  */
 contract oracleProxy is oracleProxyInterface, OracleProxyErrors {
 	address payable owner;
@@ -18,7 +18,7 @@ contract oracleProxy is oracleProxyInterface, OracleProxyErrors {
 	mapping(uint256 => Oracle) oracle;
 
 	struct Oracle {
-		oracleInterface feed;
+		bscChainlinkOracleInterface feed;
 		uint256 feedUnderlyingPoint;
 
 		bool needPriceConvert;
@@ -36,18 +36,18 @@ contract oracleProxy is oracleProxyInterface, OracleProxyErrors {
 
 	/**
 	* @dev Construct a new OracleProxy which manages many oracles
-	* @param coinOracle The address of ether's oracle contract
+	* @param bnbOracle The address of ether's oracle contract
 	* @param usdtOracle The address of usdt's oracle contract
 	* @param daiOracle The address of dai's oracle contract
-	* @param linkOracle The address of link's oracle contract
+	* @param usdcOracle The address of usdc's oracle contract
 	*/
-	constructor (address coinOracle, address usdtOracle, address daiOracle, address linkOracle, address usdcOracle) public
+	constructor (address bnbOracle, address etherOracle, address usdtOracle, address daiOracle, address usdcOracle) public
 	{
 		owner = msg.sender;
-		_setOracleFeed(0, coinOracle, 8, false, 0);
-		_setOracleFeed(1, usdtOracle, 18, true, 0);
-		_setOracleFeed(2, daiOracle, 8, false, 0);
-		_setOracleFeed(3, linkOracle, 8, false, 0);
+		_setOracleFeed(0, bnbOracle, 8, false, 0);
+    _setOracleFeed(1, etherOracle, 8, false, 0);
+		_setOracleFeed(2, usdtOracle, 18, true, 0);
+		_setOracleFeed(3, daiOracle, 18, true, 0);
 		_setOracleFeed(4, usdcOracle, 18, true, 0);
 	}
 
@@ -110,7 +110,7 @@ contract oracleProxy is oracleProxyInterface, OracleProxyErrors {
 	function _setOracleFeed(uint256 tokenID, address feedAddr, uint256 decimals, bool needPriceConvert, uint256 priceConvertID) internal returns (bool)
 	{
 		Oracle memory _oracle;
-		_oracle.feed = oracleInterface(feedAddr);
+		_oracle.feed = bscChainlinkOracleInterface(feedAddr);
 		_oracle.feedUnderlyingPoint = (10 ** decimals);
 
 		_oracle.needPriceConvert = needPriceConvert;
@@ -127,13 +127,17 @@ contract oracleProxy is oracleProxyInterface, OracleProxyErrors {
 	function getTokenPrice(uint256 tokenID) external view override returns (uint256)
 	{
 		Oracle memory _oracle = oracle[tokenID];
-		uint256 underlyingPrice = uint256(_oracle.feed.latestAnswer());
+		(, int price, , ,) = _oracle.feed.latestRoundData();
+    uint256 underlyingPrice = uint256(price);
+
 		uint256 unifiedPrice = _convertPriceToUnified(underlyingPrice, _oracle.feedUnderlyingPoint);
 
 		if (_oracle.needPriceConvert)
 		{
 			_oracle = oracle[_oracle.priceConvertID];
-			uint256 convertFeedUnderlyingPrice = uint256(_oracle.feed.latestAnswer());
+      (, price, , ,) = _oracle.feed.latestRoundData();
+
+			uint256 convertFeedUnderlyingPrice = uint256(price);
 			uint256 convertPrice = _convertPriceToUnified(convertFeedUnderlyingPrice, oracle[0].feedUnderlyingPoint);
 			unifiedPrice = unifiedMul(unifiedPrice, convertPrice);
 		}

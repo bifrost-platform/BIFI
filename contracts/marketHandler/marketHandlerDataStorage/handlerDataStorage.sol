@@ -491,6 +491,8 @@ contract marketHandlerDataStorage is marketHandlerDataStorageInterface, HandlerD
 	}
 
 	/* ******************* Safe Math ******************* */
+  // from: https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/math/SafeMath.sol
+  // Subject to the MIT license.
 	function add(uint256 a, uint256 b) internal pure returns (uint256)
 	{
 		uint256 c = a + b;

@@ -14,7 +14,8 @@ import "../Errors.sol";
  */
 contract etherLiquidationManager is liquidationManagerInterface, LiquidationManagerErrors {
 	event CircuitBreaked(bool breaked, uint256 blockNumber);
-
+  event Liquidate(address liquidator, address delinquentBorrower, uint256 liquidateHandler, uint256 liquidateAmount, uint256 rewardHandler, uint256 rewardAmount);
+  
 	address payable owner;
 
 	bool emergency = false;
@@ -136,7 +137,11 @@ contract etherLiquidationManager is liquidationManagerInterface, LiquidationMana
 		vars.rewardAmount = unifiedDiv(vars.rewardAsset, vars.receivePrice);
 
 		/* Receive reward */
-		return marketManager.partialLiquidationUserReward(delinquentBorrower, vars.rewardAmount, liquidator, receiveHandler);
+
+		marketManager.partialLiquidationUserReward(delinquentBorrower, vars.rewardAmount, liquidator, receiveHandler);
+    emit Liquidate(liquidator, delinquentBorrower, targetHandler, vars.liquidateAmount, receiveHandler, vars.rewardAmount);
+
+    return vars.rewardAmount;
 	}
 
 	/**

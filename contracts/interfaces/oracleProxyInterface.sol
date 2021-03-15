@@ -10,5 +10,5 @@ interface oracleProxyInterface  {
 	function getTokenPrice(uint256 tokenID) external view returns (uint256);
 
 	function getOracleFeed(uint256 tokenID) external view returns (address, uint256);
-	function setOracleFeed(uint256 tokenID, address feedAddr, uint256 decimals) external returns (bool);
+	function setOracleFeed(uint256 tokenID, address feedAddr, uint256 decimals, bool needPriceConvert, uint256 priceConvertID) external returns (bool);
 }

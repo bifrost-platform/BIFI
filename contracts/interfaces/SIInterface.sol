@@ -19,4 +19,6 @@ interface SIInterface  {
 	function getMarketRewardInfo() external view returns (uint256, uint256, uint256);
 
 	function getUserRewardInfo(address payable userAddr) external view returns (uint256, uint256, uint256);
+
+	function claimRewardAmountUser(address payable userAddr) external returns (uint256);
 }

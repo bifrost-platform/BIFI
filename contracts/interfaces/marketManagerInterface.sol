@@ -44,7 +44,7 @@ interface marketManagerInterface  {
 
 	function setLiquidationManager(address liquidationManagerAddr) external returns (bool);
 
-	function rewardClaimAll(address payable userAddr) external returns (bool);
+	function rewardClaimAll(address payable userAddr) external returns (uint256);
 
 	function updateRewardParams(address payable userAddr) external returns (bool);
 	function interestUpdateReward() external returns (bool);

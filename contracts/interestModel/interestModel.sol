@@ -4,6 +4,7 @@ pragma solidity 0.6.12;
 
 import "../interfaces/interestModelInterface.sol";
 import "../interfaces/marketHandlerDataStorageInterface.sol";
+import "../SafeMath.sol";
 import "../Errors.sol";
 
  /**
@@ -12,11 +13,22 @@ import "../Errors.sol";
   * @author BiFi(seinmyung25, Miller-kk, tlatkdgus1, dongchangYoo)
   */
 contract interestModel is interestModelInterface, InterestErrors {
+	using SafeMath for uint256;
+
 	address owner;
+	mapping(address => bool) public operators;
 
-	uint256 constant blocksPerYear = 2102400;
-
+	uint256 public blocksPerYear;
 	uint256 constant unifiedPoint = 10 ** 18;
+
+	uint256 minRate;
+	uint256 basicSensitivity;
+
+	/* jump rate model prams */
+	uint256 jumpPoint;
+	uint256 jumpSensitivity;
+
+	uint256 spreadRate;
 
 	struct InterestUpdateModel {
 		uint256 SIR;
@@ -44,12 +56,33 @@ contract interestModel is interestModelInterface, InterestErrors {
 		_;
 	}
 
+	modifier onlyOperator {
+		address sender = msg.sender;
+		require(operators[sender] || sender == owner, "Only Operators");
+		_;
+	}
+
 	/**
 	* @dev Construct a new interestModel contract
+	* @param _minRate minimum interest rate
+	* @param _jumpPoint Threshold of utilizationRate to which normal interest model
+	* @param _basicSensitivity liquidity basicSensitivity
+	* @param _jumpSensitivity The value used to calculate the BIR if the utilizationRate is greater than the jumpPoint.
+	* @param _spreadRate spread rate
 	*/
-	constructor () public
+	constructor (uint256 _minRate, uint256 _jumpPoint, uint256 _basicSensitivity, uint256 _jumpSensitivity, uint256 _spreadRate) public
 	{
-		owner = msg.sender;
+		address sender = msg.sender;
+		owner = sender;
+		operators[owner] = true;
+
+		minRate = _minRate;
+		basicSensitivity = _basicSensitivity;
+
+		jumpPoint = _jumpPoint;
+		jumpSensitivity = _jumpSensitivity;
+
+		spreadRate = _spreadRate;
 	}
 
 	/**
@@ -70,6 +103,17 @@ contract interestModel is interestModelInterface, InterestErrors {
 	function getOwner() public view returns (address)
 	{
 		return owner;
+	}
+
+	/**
+	* @dev set Operator or not
+	* @param _operator the address of the operator
+	* @param flag operator permission
+	* @return true (TODO: validate results)
+	*/
+	function setOperators(address payable _operator, bool flag) onlyOwner external returns (bool) {
+		operators[_operator] = flag;
+		return true;
 	}
 
 	/**
@@ -104,14 +148,13 @@ contract interestModel is interestModelInterface, InterestErrors {
 
 	/**
 	 * @dev Get Supply Interest Rate (SIR) and Borrow Interest Rate (BIR) (external)
-	 * @param handlerDataStorageAddr The address of handlerDataStorage contract
 	 * @param totalDepositAmount The amount of total deposit
 	 * @param totalBorrowAmount The amount of total borrow
 	 * @return (uint256, uin256)
 	 */
-	function getSIRandBIR(address handlerDataStorageAddr, uint256 totalDepositAmount, uint256 totalBorrowAmount) external view override returns (uint256, uint256)
+	function getSIRandBIR(uint256 totalDepositAmount, uint256 totalBorrowAmount) external view override returns (uint256, uint256)
 	{
-		return _getSIRandBIR(handlerDataStorageAddr, totalDepositAmount, totalBorrowAmount);
+		return _getSIRandBIR(totalDepositAmount, totalBorrowAmount);
 	}
 
 	/**
@@ -139,7 +182,7 @@ contract interestModel is interestModelInterface, InterestErrors {
 	function _viewInterestAmount(address handlerDataStorageAddr, address payable userAddr) internal view returns (bool, uint256, uint256, bool, uint256, uint256)
 	{
 		marketHandlerDataStorageInterface handlerDataStorage = marketHandlerDataStorageInterface(handlerDataStorageAddr);
-		uint256 blockDelta = sub(block.number, handlerDataStorage.getLastUpdatedBlock());
+		uint256 blockDelta = block.number.sub(handlerDataStorage.getLastUpdatedBlock());
 		/* check action in block */
 		uint256 globalDepositEXR;
 		uint256 globalBorrowEXR;
@@ -158,7 +201,7 @@ contract interestModel is interestModelInterface, InterestErrors {
 		InterestUpdateModel memory interestUpdateModel;
 		marketHandlerDataStorageInterface handlerDataStorage = marketHandlerDataStorageInterface(handlerDataStorageAddr);
 		(interestUpdateModel.depositTotalAmount, interestUpdateModel.borrowTotalAmount, interestUpdateModel.userDepositAmount, interestUpdateModel.userBorrowAmount) = handlerDataStorage.getAmount(userAddr);
-		(interestUpdateModel.SIR, interestUpdateModel.BIR) = _getSIRandBIRonBlock(handlerDataStorageAddr, interestUpdateModel.depositTotalAmount, interestUpdateModel.borrowTotalAmount);
+		(interestUpdateModel.SIR, interestUpdateModel.BIR) = _getSIRandBIRonBlock(interestUpdateModel.depositTotalAmount, interestUpdateModel.borrowTotalAmount);
 		(interestUpdateModel.userDepositEXR, interestUpdateModel.userBorrowEXR) = handlerDataStorage.getUserEXR(userAddr);
 
 		/* deposit start */
@@ -187,43 +230,55 @@ contract interestModel is interestModelInterface, InterestErrors {
 			return 0;
 		}
 
-		return unifiedDiv(borrowTotalAmount, add(depositTotalAmount, borrowTotalAmount));
+		return borrowTotalAmount.unifiedDiv(depositTotalAmount);
 	}
 
 	/**
 	 * @dev Get SIR and BIR (internal)
-	 * @param handlerDataStorageAddr The address of handlerDataStorage contract
 	 * @param depositTotalAmount The amount of total deposit
 	 * @param borrowTotalAmount The amount of total borrow
 	 * @return (uint256, uin256)
 	 */
-	function _getSIRandBIR(address handlerDataStorageAddr, uint256 depositTotalAmount, uint256 borrowTotalAmount) internal view returns (uint256, uint256)
+	function _getSIRandBIR(uint256 depositTotalAmount, uint256 borrowTotalAmount) internal view returns (uint256, uint256)
+	// TODO: update comment(jump rate)
 	{
-		marketHandlerDataStorageInterface handlerDataStorage = marketHandlerDataStorageInterface(handlerDataStorageAddr);
-		uint256 _minimumInterestRate = handlerDataStorage.getMinimumInterestRate();
-		uint256 _liquiditySensitivity = handlerDataStorage.getLiquiditySensitivity();
 		/* UtilRate = TotalBorrow / (TotalDeposit + TotalBorrow) */
 		uint256 utilRate = _getUtilizationRate(depositTotalAmount, borrowTotalAmount);
+		uint256 BIR;
+		uint256 _jmpPoint = jumpPoint;
 		/* BIR = minimumRate + (UtilRate * liquiditySensitivity) */
-		uint256 BIR = add(_minimumInterestRate, unifiedMul(utilRate, _liquiditySensitivity));
+		if(utilRate < _jmpPoint) {
+			BIR = utilRate.unifiedMul(basicSensitivity).add(minRate);
+		} else {
+      /*
+      Formula : BIR = minRate + jumpPoint * basicSensitivity + (utilRate - jumpPoint) * jumpSensitivity
+
+			uint256 _baseBIR = _jmpPoint.unifiedMul(basicSensitivity);
+			uint256 _jumpBIR = utilRate.sub(_jmpPoint).unifiedMul(jumpSensitivity);
+			BIR = minRate.add(_baseBIR).add(_jumpBIR);
+      */
+      BIR = minRate
+      .add( _jmpPoint.unifiedMul(basicSensitivity) )
+      .add( utilRate.sub(_jmpPoint).unifiedMul(jumpSensitivity) );
+		}
+
 		/* SIR = UtilRate * BIR */
-		uint256 SIR = unifiedMul(utilRate, BIR);
+		uint256 SIR = utilRate.unifiedMul(BIR).unifiedMul(spreadRate);
 		return (SIR, BIR);
 	}
 
 	/**
 	 * @dev Get SIR and BIR per block (internal)
-	 * @param handlerDataStorageAddr The address of handlerDataStorage contract
 	 * @param depositTotalAmount The amount of total deposit
 	 * @param borrowTotalAmount The amount of total borrow
 	 * @return (uint256, uin256)
 	 */
-	function _getSIRandBIRonBlock(address handlerDataStorageAddr, uint256 depositTotalAmount, uint256 borrowTotalAmount) internal view returns (uint256, uint256)
+	function _getSIRandBIRonBlock(uint256 depositTotalAmount, uint256 borrowTotalAmount) internal view returns (uint256, uint256)
 	{
 		uint256 SIR;
 		uint256 BIR;
-		(SIR, BIR) = _getSIRandBIR(handlerDataStorageAddr, depositTotalAmount, borrowTotalAmount);
-		return (div(SIR, blocksPerYear), div(BIR, blocksPerYear));
+		(SIR, BIR) = _getSIRandBIR(depositTotalAmount, borrowTotalAmount);
+		return ( SIR.div(blocksPerYear), BIR.div(blocksPerYear) );
 	}
 
 	/**
@@ -235,7 +290,7 @@ contract interestModel is interestModelInterface, InterestErrors {
 	 */
 	function _getNewGlobalEXR(uint256 actionEXR, uint256 interestRate, uint256 delta) internal pure returns (uint256)
 	{
-		return unifiedMul(actionEXR, add(unifiedPoint, mul(interestRate, delta)));
+		return interestRate.mul(delta).add(unifiedPoint).unifiedMul(actionEXR);
 	}
 
 	/**
@@ -253,7 +308,7 @@ contract interestModel is interestModelInterface, InterestErrors {
 		if (unifiedAmount != 0)
 		{
 			(negativeFlag, deltaEXR) = _getDeltaEXR(globalEXR, userEXR);
-			deltaAmount = unifiedMul(unifiedAmount, deltaEXR);
+			deltaAmount = unifiedAmount.unifiedMul(deltaEXR);
 		}
 
 		return (negativeFlag, deltaAmount);
@@ -267,82 +322,61 @@ contract interestModel is interestModelInterface, InterestErrors {
 	 */
 	function _getDeltaEXR(uint256 newGlobalEXR, uint256 lastUserEXR) internal pure returns (bool, uint256)
 	{
-		uint256 EXR = unifiedDiv(newGlobalEXR, lastUserEXR);
+		uint256 EXR = newGlobalEXR.unifiedDiv(lastUserEXR);
 		if (EXR >= unifiedPoint)
 		{
-			return (false, sub(EXR, unifiedPoint));
+			return ( false, EXR.sub(unifiedPoint) );
 		}
 
-		return (true, sub(unifiedPoint, EXR));
+		return ( true, unifiedPoint.sub(EXR) );
+	}
+	//TODO: Need comment
+	function getMinRate() external view returns (uint256) {
+		return minRate;
 	}
 
-	/* ******************* Safe Math ******************* */
-  // from: https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/math/SafeMath.sol
-  // Subject to the MIT license.
-	function add(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		uint256 c = a + b;
-		require(c >= a, "add overflow");
-		return c;
+	function setMinRate(uint256 _minRate) external onlyOperator returns (bool) {
+		minRate = _minRate;
+		return true;
 	}
 
-	function sub(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		return _sub(a, b, "sub overflow");
+	function getBasicSensitivity() external view returns (uint256) {
+		return basicSensitivity;
 	}
 
-	function mul(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		return _mul(a, b);
+	function setBasicSensitivity(uint256 _sensitivity) external onlyOperator returns (bool) {
+		basicSensitivity = _sensitivity;
+		return true;
 	}
 
-	function div(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		return _div(a, b, "div by zero");
+	function getJumpPoint() external view returns (uint256) {
+		return jumpPoint;
 	}
 
-	function mod(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		return _mod(a, b, "mod by zero");
+	function setJumpPoint(uint256 _jumpPoint) external onlyOperator returns (bool) {
+		jumpPoint = _jumpPoint;
+		return true;
 	}
 
-	function _sub(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256)
-	{
-		require(b <= a, errorMessage);
-		return a - b;
+	function getJumpSensitivity() external view returns (uint256) {
+		return jumpSensitivity;
 	}
 
-	function _mul(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		if (a == 0)
-		{
-			return 0;
-		}
-
-		uint256 c = a * b;
-		require((c / a) == b, "mul overflow");
-		return c;
+	function setJumpSensitivity(uint256 _sensitivity) external onlyOperator returns (bool) {
+		jumpSensitivity = _sensitivity;
+		return true;
 	}
 
-	function _div(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256)
-	{
-		require(b > 0, errorMessage);
-		return a / b;
+	function getSpreadRate() external view returns (uint256) {
+		return spreadRate;
 	}
 
-	function _mod(uint256 a, uint256 b, string memory errorMessage) internal pure returns (uint256)
-	{
-		require(b != 0, errorMessage);
-		return a % b;
+	function setSpreadRate(uint256 _spreadRate) external onlyOperator returns (bool) {
+		spreadRate = _spreadRate;
+		return true;
 	}
-
-	function unifiedDiv(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		return _div(_mul(a, unifiedPoint), b, "unified div by zero");
-	}
-
-	function unifiedMul(uint256 a, uint256 b) internal pure returns (uint256)
-	{
-		return _div(_mul(a, b), unifiedPoint, "unified mul by zero");
+	function setBlocksPerYear(uint256 _blocksPerYear) external onlyOperator returns (bool) {
+		blocksPerYear = _blocksPerYear;
+		return true;
 	}
 }

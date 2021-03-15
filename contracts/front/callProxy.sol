@@ -12,7 +12,13 @@ import "../interfaces/proxyContractInterface.sol";
  * @author BiFi(seinmyung25, Miller-kk, tlatkdgus1, dongchangYoo)
  */
 contract callProxyManagerCallProxyHandlerCallProxyMarketCallProxyUserCallProxySISafeMath  {
+  address owner;
+
 	marketManagerInterface callProxyManager_marketManager;
+
+	uint256 constant safeMath_unifiedPoint = 10 ** 18;
+
+	uint256 callProxySI_blocksPerDay;
 
 	struct callProxyHandler_ProxyInfo {
 		bool result;
@@ -54,8 +60,6 @@ contract callProxyManagerCallProxyHandlerCallProxyMarketCallProxyUserCallProxySI
 		uint256 userDepositCreditAsset;
 		uint256 userBorrowCreditAsset;
 	}
-
-	uint256 callProxySI_blocksPerDay = 6646;
 
 	struct callProxySI_HandlerInfo {
 		bool support;
@@ -100,12 +104,38 @@ contract callProxyManagerCallProxyHandlerCallProxyMarketCallProxyUserCallProxySI
 		uint256 rewardAmount;
 	}
 
-	uint256 constant safeMath_unifiedPoint = 10 ** 18;
+  modifier onlyOwner {
+		require(msg.sender == owner, "onlyOwner");
+		_;
+	}
 
-	constructor (address _marketManagerAddr) public
+	constructor () public
 	{
+    	owner = msg.sender;
+	}
+	function setManagerAddr(address _marketManagerAddr) external onlyOwner returns (bool) {
 		callProxyManager_marketManager = marketManagerInterface(_marketManagerAddr);
 	}
+
+  function destruct() public onlyOwner {
+    selfdestruct(payable(owner));
+  }
+
+  function setOwner(address newOwner) public onlyOwner returns (bool) {
+    owner = newOwner;
+    return true;
+  }
+
+  function callProxyManager_setManagerAddr(address _marketManagerAddr) public onlyOwner returns (bool)
+	{
+    callProxyManager_marketManager = marketManagerInterface(_marketManagerAddr);
+    return true;
+	}
+
+  function callProxySI_setBlocksPerDay(uint256 _callProxySI_blocksPerDay) public onlyOwner returns (bool) {
+    callProxySI_blocksPerDay = _callProxySI_blocksPerDay;
+    return true;
+  }
 
 	function callProxyManager_getTokenHandlerInfo(uint256 handlerID) public view returns (bool, address, string memory)
 	{
