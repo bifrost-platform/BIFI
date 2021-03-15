@@ -13,9 +13,11 @@ solidityCompile() {
 
     echo $1 >> codesize
     solc --optimize --combined-json bin-runtime $1 --allow-paths $SOURCE_DIR > $1".json"
-    CODESIZE=$(cat $1.json | jq '.contracts[] | select(."bin-runtime" != "") | ."bin-runtime"' | wc -m)
-    CODESIZE=`expr $CODESIZE / 2`
+    CODESIZE=$(cat $1.json | jq '.contracts[] | select(."bin-runtime" != "") | ."bin-runtime"' | tail -1 | wc -m)
+    echo $CODESIZE >> codesize
+    CODESIZE=`expr $CODESIZE / 2 - 1`
     PERCENT=`expr $CODESIZE \* 100 / 24576`
+
     echo $PERCENT\% >> codesize
     if [ $CODESIZE -gt 24576 ] ; then
             ERROR=true
